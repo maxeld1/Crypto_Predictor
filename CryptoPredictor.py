@@ -1,5 +1,4 @@
 import numpy as np
-from pycoingecko import CoinGeckoAPI
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
@@ -10,87 +9,103 @@ import os
 # Disable oneDNN optimizations
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
-# Initialize the CoinGecko API
-cg = CoinGeckoAPI()
+# Load Ethereum historical data from CSV
+df = pd.read_csv("ethereum_data.csv")
 
-# Fetch historical price data for Bitcoin
-data = cg.get_coin_market_chart_by_id(id='ethereum', vs_currency='usd',
-                                      days='365')
-prices = data['prices']
-df = pd.DataFrame(prices, columns=['Timestamp', 'Close'])
-df['Date'] = pd.to_datetime(df['Timestamp'], unit='ms')
+# Convert Date column to datetime format and set as index
+df['Date'] = pd.to_datetime(df['Date'], format="%m/%d/%Y")
 df.set_index('Date', inplace=True)
-df = df[['Close']]
 
-# Scale data
+# Remove commas and convert columns to numeric types
+df['Price'] = pd.to_numeric(df['Price'].str.replace(',', ''), errors='coerce')
+
+# Extract only the closing price
+price_data = df[['Price']]
+
+# Scale the data between 0 and 1 for LSTM input
 scaler = MinMaxScaler(feature_range=(0, 1))
-scaled_data = scaler.fit_transform(df)
+scaled_data = scaler.fit_transform(price_data)
 
-# Define training data length
-training_data_len = int(len(scaled_data) * 0.8)  # Use 80% of data for training
+# Define the training data length
+training_data_len = int(
+    len(scaled_data) * 0.7)  # 70% for training to ensure a longer test period
 train_data = scaled_data[:training_data_len]
 
-# Prepare the training data
+# Prepare training data sequences
 X_train, y_train = [], []
 for i in range(60, len(train_data)):
-    X_train.append(train_data[i-60:i, 0])  # 60 timesteps
-    y_train.append(train_data[i, 0])
+    X_train.append(train_data[i - 60:i, 0])  # Past 60 days as input
+    y_train.append(train_data[i, 0])  # 61st day as output
 
-# Convert to numpy arrays
+# Convert to numpy arrays and reshape for LSTM model
 X_train, y_train = np.array(X_train), np.array(y_train)
-
-# Reshape X_train for LSTM model
 X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
 
-# Define the model
+# Define the LSTM model with increased complexity
 model = Sequential()
-model.add(LSTM(50, return_sequences=True, input_shape=(X_train.shape[1], 1)))
+model.add(LSTM(100, return_sequences=True, input_shape=(X_train.shape[1], 1)))
+model.add(LSTM(100, return_sequences=True))
 model.add(LSTM(50, return_sequences=False))
 model.add(Dense(25))
 model.add(Dense(1))
 
-# Compile the model
+# Compile and train the model with more epochs
 model.compile(optimizer='adam', loss='mean_squared_error')
+model.fit(X_train, y_train, batch_size=1, epochs=50)
 
-# Train the model
-model.fit(X_train, y_train, batch_size=1, epochs=1)
-
-# Prepare test data
+# Prepare test data to cover the full desired date range
 test_data = scaled_data[training_data_len - 60:]
-X_test, y_test = [], df['Close'][training_data_len:]
+X_test, y_test = [], price_data['Price'][training_data_len:]
 
+# Prepare test sequences
 for i in range(60, len(test_data)):
-    X_test.append(test_data[i-60:i, 0])
+    X_test.append(test_data[i - 60:i, 0])
 
-# Convert to numpy arrays and reshape for LSTM
 X_test = np.array(X_test)
 X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
 
-# Make predictions
+# Make predictions and reverse scale
 predictions = model.predict(X_test)
 predictions = scaler.inverse_transform(predictions)  # Reverse scaling
 
 # Prepare data for visualization
 train = df[:training_data_len]
-valid = df[training_data_len:]
-valid['Predictions'] = predictions
+valid = df[
+        training_data_len:].copy()  # Use copy to avoid SettingWithCopyWarning
+valid['Predictions'] = predictions  # Add predictions as a new column
 
 # Visualize the results
-plt.figure(figsize=(16,8))
+plt.figure(figsize=(16, 8))
 plt.title('Crypto Price Prediction')
 plt.xlabel('Date')
 plt.ylabel('Price in USD')
-plt.plot(train['Close'])
-plt.plot(valid[['Close', 'Predictions']])
-plt.legend(['Train', 'Val', 'Predictions'], loc='lower right')
+plt.plot(df['Price'],
+         label='Actual')  # Plot the full actual prices for reference
+plt.plot(valid['Price'], label='Actual (Validation)')
+plt.plot(valid['Predictions'], label='Predictions')
+plt.legend(loc='lower right')
 plt.show()
 
-# Prepare the input for the next day prediction
+# Predict next few days
+days_to_predict = 5
 last_60_days = scaled_data[-60:]
-next_day_input = np.array([last_60_days])
-next_day_input = np.reshape(next_day_input, (next_day_input.shape[0], next_day_input.shape[1], 1))
+predictions_extended = []
 
-# Predict the next day's price and reverse scale
-next_day_prediction = model.predict(next_day_input)
-next_day_prediction = scaler.inverse_transform(next_day_prediction)
-print("Next day's predicted price:", next_day_prediction[0][0])
+for _ in range(days_to_predict):
+    next_day_input = np.array([last_60_days])
+    next_day_input = np.reshape(next_day_input, (
+    next_day_input.shape[0], next_day_input.shape[1], 1))
+
+    next_day_prediction = model.predict(next_day_input)
+    next_day_prediction_rescaled = scaler.inverse_transform(
+        next_day_prediction)
+    predictions_extended.append(next_day_prediction_rescaled[0][0])
+
+    # Update last_60_days with the new prediction for rolling prediction
+    last_60_days = np.append(last_60_days[1:], next_day_prediction).reshape(-1,
+                                                                            1)
+
+# Print the predictions for the specified days ahead
+print(f"Predicted prices for the next {days_to_predict} days:")
+for day, price in enumerate(predictions_extended, 1):
+    print(f"Day {day}: ${price:.2f}")
