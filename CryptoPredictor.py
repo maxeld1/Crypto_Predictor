@@ -86,6 +86,7 @@ X_test = np.array(X_test)
 predictions = model.predict(X_test)
 predictions = scaler.inverse_transform(np.concatenate([predictions, np.zeros((predictions.shape[0], 2))], axis=1))[:, 0]
 
+
 # Add GRU predictions to the validation DataFrame
 train = df[:training_data_len]
 valid = df[training_data_len:]
